@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <Ethernet.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
 
 // --- Ethernet & Hardware Definitions ---
 byte mac[] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
@@ -42,7 +44,7 @@ struct Network
 float currentTemperature = 0.0;
 unsigned long lastTransmissionTime = 0;
 unsigned long lastRecapTime = 0;
-String sensorName = "TEST-BLOW-004-TEMP001"; // Default sensor name
+String sensorName = "TEST-BLOW-004_TEMP001"; // Default sensor name
 EthernetClient ethClient; // Ethernet Client instance
 
 // --- Function Declarations ---
@@ -50,16 +52,19 @@ void handleSerialInput();
 void sendData();
 void sendViaHTTP();
 void sendViaMQTT();
+void sendViaWiFiSecure(); // Function for HTTPS via WiFi
 
 void setup() {
   Serial.begin(9800); 
   
   // --- Init Default Settings ---
   networkSettings.protocolMode = "HTTP";
-  networkSettings.endpoint = "http://api-logger-dev2.medionindonesia.com/api/v1/UpdateLoggingRealtime"; // Menggunakan HTTP untuk W5500
+  networkSettings.endpoint = "https://api-logger-dev2.medionindonesia.com/api/v1/UpdateLoggingRealtime"; // HTTPS requires WiFi
   networkSettings.mqttUsername = "Medion";
   networkSettings.erpUsername = "Medion";      // Username API
   networkSettings.erpPassword = "iot@medion";  // Password API
+  networkSettings.ssid = "Mitsurugi";          // WiFi SSID
+  networkSettings.password = "Medion23";       // WiFi Password
   networkSettings.sendInterval = 10.0; // 10 detik
 
   // --- Init Ethernet W5500 ---
@@ -100,6 +105,8 @@ void setup() {
   Serial.println("  erp_user:<user>   Set ERP Username");
   Serial.println("  erp_pass:<pass>   Set ERP Password");
   Serial.println("  recap:<min>       Set Recap Interval (Minutes)");
+  Serial.println("  ssid:<name>       Set WiFi SSID (For HTTPS)");
+  Serial.println("  wifi_pass:<pass>  Set WiFi Password");
   Serial.println("  <number>          Set Temperature (e.g., 25.5)");
   Serial.println("-----------------------------");
 }
@@ -154,6 +161,12 @@ void handleSerialInput() {
     } else if (input.startsWith("recap:")) {
       networkSettings.recapInterval = input.substring(6).toInt();
       Serial.printf("Recap Interval set to: %d minutes\n", networkSettings.recapInterval);
+    } else if (input.startsWith("ssid:")) {
+      networkSettings.ssid = input.substring(5);
+      Serial.println("WiFi SSID set to: " + networkSettings.ssid);
+    } else if (input.startsWith("wifi_pass:")) {
+      networkSettings.password = input.substring(10);
+      Serial.println("WiFi Password set.");
     } else {
       float val = input.toFloat();
       if (val != 0.0 || input.equals("0") || input.equals("0.0")) {
@@ -168,7 +181,11 @@ void sendData() {
   Serial.println("\n[TRIGGER] Transmission Interval Reached.");
   
   if (networkSettings.protocolMode == "HTTP") {
-    sendViaHTTP();
+    if (networkSettings.endpoint.startsWith("https://")) {
+      sendViaWiFiSecure();
+    } else {
+      sendViaHTTP();
+    }
   } else if (networkSettings.protocolMode == "MQTT") {
     sendViaMQTT();
   } else {
@@ -235,7 +252,7 @@ void sendViaHTTP() {
   
   // Prepare JSON payload
   // Menggunakan targetUser yang sesuai (ERP User atau Default User)
-  String payload = "{\"" + sensorName + "\": " + String(currentTemperature) + ", \"user\": \"" + targetUser + "\"}";
+  String payload = "{\"KodeSensor\": \"" + sensorName + "\", \"Value\": " + String(currentTemperature) + ", \"Nilai\": " + String(currentTemperature) + "}";
   
   Serial.println("[HTTP] Payload: " + payload);
   
@@ -304,6 +321,91 @@ void sendViaHTTP() {
   } else {
      Serial.println("[HTTP] Connection failed");
      if (port == 443) Serial.println("[HTTP] Warning: W5500 Ethernet does not support SSL/HTTPS. Ensure server supports HTTP.");
+  }
+}
+
+void sendViaWiFiSecure() {
+  if (networkSettings.ssid.length() == 0) {
+    Serial.println("[HTTPS] Error: WiFi SSID not set. Cannot use HTTPS without WiFi.");
+    Serial.println(">> Use 'ssid:<name>' and 'wifi_pass:<pass>' to configure WiFi.");
+    return;
+  }
+
+  // Connect to WiFi if not connected
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.printf("[WiFi] Connecting to %s...\n", networkSettings.ssid.c_str());
+    WiFi.begin(networkSettings.ssid.c_str(), networkSettings.password.c_str());
+    
+    unsigned long startAttempt = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 10000) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println();
+    
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[WiFi] Connection Failed.");
+      return;
+    }
+    Serial.print("[WiFi] Connected. IP: ");
+    Serial.println(WiFi.localIP());
+  }
+
+  // HTTPS Request
+  WiFiClientSecure client;
+  client.setInsecure(); // Skip certificate validation for development (Fixes SSL handshake issues)
+  
+  String targetUrl = (networkSettings.erpUrl.length() > 0) ? networkSettings.erpUrl : networkSettings.endpoint;
+  String targetUser = (networkSettings.erpUsername.length() > 0) ? networkSettings.erpUsername : networkSettings.mqttUsername;
+  targetUrl.trim();
+
+  // Simple parsing for HTTPS
+  int indexProtocol = targetUrl.indexOf("://");
+  String host = targetUrl.substring(indexProtocol + 3);
+  String path = "/";
+  int indexPath = host.indexOf("/");
+  if (indexPath != -1) {
+    path = host.substring(indexPath);
+    host = host.substring(0, indexPath);
+  }
+  
+  Serial.printf("[HTTPS] Connecting to %s (Port 443)...\n", host.c_str());
+
+  if (client.connect(host.c_str(), 443)) {
+    Serial.println("[HTTPS] Connected!");
+    
+    // Payload Update: Hapus 'user' (sudah di Auth Header), tambah 'Nilai' (antisipasi field B.Indo)
+    String payload = "{\"KodeSensor\": \"" + sensorName + "\", \"Value\": " + String(currentTemperature) + ", \"Nilai\": " + String(currentTemperature) + "}";
+    String auth = base64Encode(networkSettings.erpUsername + ":" + networkSettings.erpPassword);
+
+    client.print("POST ");
+    client.print(path);
+    client.println(" HTTP/1.1");
+    client.print("Host: ");
+    client.println(host);
+    client.println("User-Agent: ESP32-WiFi-Logger");
+    client.println("Content-Type: application/json");
+    client.print("Authorization: Basic ");
+    client.println(auth);
+    client.print("Content-Length: ");
+    client.println(payload.length());
+    client.println("Connection: close");
+    client.println();
+    client.println(payload);
+
+    // Read Status Line first (e.g., HTTP/1.1 200 OK)
+    String statusLine = client.readStringUntil('\n');
+    Serial.println("[HTTPS] Status: " + statusLine);
+
+    while (client.connected()) {
+      String line = client.readStringUntil('\n');
+      if (line == "\r") break;
+    }
+    String response = client.readString();
+    Serial.println("[HTTPS] Response:");
+    Serial.println(response);
+  } else {
+    Serial.println("[HTTPS] Connection Failed.");
   }
 }
 
