@@ -121,6 +121,10 @@ void loop() {
   // 2. Check Transmission Trigger (Time Interval)
   unsigned long now = millis();
   if (now - lastTransmissionTime >= (networkSettings.sendInterval * 1000)) {
+    // Generate random temperature between 20.00 and 40.00
+    currentTemperature = 20.0 + (random(0, 2000) / 100.0);
+    Serial.printf("[SENSOR] Random Temp generated: %.2f\n", currentTemperature);
+
     sendData();
     lastTransmissionTime = now;
   }
